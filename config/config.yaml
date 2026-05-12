@@ -1,0 +1,68 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-Pipeline ETL Framework – Central Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+database:
+  # Options: sqlite | mysql | postgresql
+  type: sqlite
+
+  sqlite:
+    path: ./etl_results.db
+
+  mysql:
+    host: localhost
+    port: 3306
+    database: nosql_etl
+    username: root
+    password: ""
+
+  postgresql:
+    host: localhost
+    port: 5432
+    database: nosql_etl
+    username: postgres
+    password: ""
+
+mongodb:
+  host: localhost
+  port: 27017
+  database: nosql_etl
+  # Collection that raw parsed records are loaded into before aggregation.
+  # The pipeline drops and recreates this collection on every run to keep
+  # comparisons fair across runs.
+  raw_collection: web_logs
+
+etl:
+  # Number of log records processed in one batch.
+  # Must be kept the same across all pipelines in a comparative experiment.
+  batch_size: 10000
+
+  # Paths to the NASA HTTP log files.  Gzipped (.gz) files are supported.
+  # Download them with:
+  #   wget https://ita.ee.lbl.gov/traces/NASA_access_log_Jul95.gz -P data/
+  #   wget https://ita.ee.lbl.gov/traces/NASA_access_log_Aug95.gz -P data/
+  log_files:
+    - ./data/NASA_access_log_Jul95.gz
+    - ./data/NASA_access_log_Aug95.gz
+
+pig:
+  # Absolute path to the pig executable (or just 'pig' if on PATH)
+  executable: pig
+  # Where Pig will write its temporary output before the Python loader
+  # picks it up and pushes it into the relational DB.
+  output_dir: /tmp/pig_etl_output
+
+hive:
+  # Command used to invoke Hive.  For Hive 2+ with beeline you would use:
+  #   executable: beeline
+  #   connection: "jdbc:hive2://localhost:10000"
+  # For the legacy Hive CLI use:
+  #   executable: hive
+  executable: hive
+  # macOS Apple Silicon compatibility:
+  # - disable_jna avoids JLine/JNA native library loading issues in beeline/hive.
+  # - use_rosetta runs the Hive CLI under Rosetta (x86_64) if your Hive install is Intel-only.
+  disable_jna: true
+  use_rosetta: true
+  warehouse_dir: /user/hive/warehouse
+  output_dir: /tmp/hive_etl_output
