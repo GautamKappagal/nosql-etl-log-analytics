@@ -235,6 +235,19 @@ def save_results(
                     conn.execute(insert(tbl), rows_to_insert[i:i + chunk_size])
 
 
+def update_run_runtime(engine: Engine, run_id: str, runtime_seconds: float) -> None:
+    """Update runtime after DB loading has completed."""
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE run_metadata "
+                "SET runtime_seconds = :runtime_seconds "
+                "WHERE run_id = :run_id"
+            ),
+            {"runtime_seconds": runtime_seconds, "run_id": run_id},
+        )
+
+
 def fetch_run(engine: Engine, run_id: str) -> Dict[str, Any]:
     """
     Retrieve a complete run from the DB and return it as a plain dict.
