@@ -1,0 +1,10 @@
+199.72.81.55 - - [01/Jul/1995:00:00:01 -0400] "GET /history/apollo/ HTTP/1.0" 200 6245
+199.72.81.55 - - [01/Jul/1995:00:30:15 -0400] "GET /index.html HTTP/1.0" 200 3245
+uplherc.upl.com - - [01/Jul/1995:01:00:07 -0400] "GET / HTTP/1.0" 304 -
+gateway.uky.edu - - [01/Jul/1995:02:54:51 -0400] "GET /shuttle/countdown/ HTTP/1.0" 200 5245
+badclient.com - - [01/Jul/1995:03:00:00 -0400] "GET /error.html HTTP/1.0" 404 0
+servererror.com - - [01/Jul/1995:04:00:00 -0400] "GET /crash HTTP/1.0" 500 0
+199.72.81.55 - - [02/Jul/1995:00:00:01 -0400] "GET /history/apollo/ HTTP/1.0" 200 6245
+199.72.81.55 - - [02/Jul/1995:01:00:01 -0400] "GET /index.html HTTP/1.0" 200 3245
+gateway.uky.edu - - [02/Jul/1995:02:00:00 -0400] "GET /error.html HTTP/1.0" 404 0
+malformed line here
