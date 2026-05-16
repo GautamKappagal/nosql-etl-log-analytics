@@ -28,6 +28,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
+
+
 from parser.log_parser import parse_log_line, batch_read_log_files
 from pipelines.base import (
     ALL_QUERIES, BasePipeline, BatchRecord, QueryResult, RunMetadata,
@@ -68,19 +70,33 @@ class HivePipeline(BasePipeline):
     ) -> Tuple[RunMetadata, List[QueryResult], List[BatchRecord], Dict[str, int]]:
         cfg = self.config.get("hive", {})
         hive_exe = cfg.get("executable", "hive")
+        hdfs_exe = cfg.get("hdfs_executable", "hdfs")
+        hdfs_input_dir = cfg.get("input_dir", "/tmp/hive_input")
+        execution_engine = cfg.get("execution_engine", "mr")
 
-        if not shutil.which(hive_exe):
+        if shutil.which(hive_exe) is None:
             raise RuntimeError(
                 f"Hive executable '{hive_exe}' not found on PATH. "
                 "Install Hive or update config/config.yaml → hive.executable."
+            )
+
+        if shutil.which(hdfs_exe) is None:
+            raise RuntimeError(
+                f"HDFS executable '{hdfs_exe}' not found on PATH. "
+                "Install Hadoop or update config/config.yaml → hive.hdfs_executable."
             )
 
         active_queries = self.resolve_queries(queries)
         wall_start = time.perf_counter()
 
         run_id = str(uuid.uuid4())
+
+        # Create a temporary directory on the local filesystem.
         tmp_dir = tempfile.mkdtemp(prefix="hive_etl_")
+
+        # Path used by Python to write combined.log.
         input_file = os.path.join(tmp_dir, "combined.log")
+
         output_db = "nosql_etl_hive"
 
         # ── Phase 1: Write ALL raw lines to flat file ─────────────────────
@@ -119,16 +135,36 @@ class HivePipeline(BasePipeline):
                     records_in_batch=batch_total,
                     malformed_in_batch=batch_malformed,
                 ))
+        # Upload combined.log to HDFS so Hive can read it reliably.
+        subprocess.run(
+            [hdfs_exe, "dfs", "-mkdir", "-p", hdfs_input_dir],
+            check=True,
+        )
+
+        subprocess.run(
+            [
+                hdfs_exe,
+                "dfs",
+                "-put",
+                "-f",
+                input_file,
+                f"{hdfs_input_dir}/combined.log",
+            ],
+            check=True,
+        )
 
         # ── Phase 2: Invoke Hive ───────────────────────────────────────────
         hive_cmd = [
             hive_exe,
-            "--hivevar", f"INPUT_LOCATION={tmp_dir}",
+            "--hiveconf", f"hive.execution.engine={execution_engine}",
+            "--hivevar", f"INPUT_LOCATION={hdfs_input_dir}",
             "--hivevar", f"OUTPUT_DB={output_db}",
             "--hivevar", f"BATCH_SIZE={self.batch_size}",
             "-f", _ETL_SCRIPT,
         ]
-
+        print("\nExecuting Hive command:")
+        print(" ".join(hive_cmd))
+        print()
         result = subprocess.run(hive_cmd, capture_output=True, text=True)
 
         if result.returncode != 0:
@@ -180,7 +216,10 @@ class HivePipeline(BasePipeline):
                 data=q3_data,
                 runtime_secs=0.0,
             ))
-
+        print("\nQuery result sizes:")
+        for r in results:
+            print(f"{r.query_name}: {len(r.data)} rows")
+        print(f"Total QueryResult objects: {len(results)}")
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
         meta = self.make_run_metadata(
@@ -195,11 +234,13 @@ class HivePipeline(BasePipeline):
 
         # ── Phase 4: Save to database (included in runtime) ────────────────
         if engine is not None:
-            from loader.db_loader import save_results
+            from loader.db_loader import save_results, update_run_runtime
             save_results(engine, meta, results, batch_records, dict(error_type_counts))
-
-        # Runtime includes everything from reading input to DB save
-        meta.runtime_seconds = time.perf_counter() - wall_start
+            meta.runtime_seconds = time.perf_counter() - wall_start
+            update_run_runtime(engine, meta.run_id, meta.runtime_seconds)
+        else:
+            # Runtime includes everything from reading input to DB save
+            meta.runtime_seconds = time.perf_counter() - wall_start
 
         return meta, results, batch_records, dict(error_type_counts)
 
@@ -215,23 +256,61 @@ class HivePipeline(BasePipeline):
         columns: List[str],
         types: List[type],
     ) -> List[Dict[str, Any]]:
-        """Run a SELECT * query via hive -e and parse tab-separated output."""
+        """Run a SELECT * query via Hive and parse tab-separated output."""
         query = f"USE {db}; SELECT * FROM {table};"
+
+        # Use the same hive executable that works for the ETL script.
+        cmd = [hive_exe, "-S", "-e", query]
+
         result = subprocess.run(
-            [hive_exe, "-e", query],
+            cmd,
             capture_output=True,
             text=True,
         )
+        print("STDOUT preview:")
+        for line in result.stdout.splitlines()[:20]:
+            print(repr(line))
+
+        # Debug information (helps if output format changes).
+        print(f"\nReading table: {table}")
+        print("Return code:", result.returncode)
+        if result.stderr.strip():
+            print("STDERR preview:")
+            for line in result.stderr.splitlines()[:10]:
+                print(line)
+
         rows: List[Dict[str, Any]] = []
+
         for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+
             parts = line.split("\t")
             if len(parts) < len(columns):
                 continue
+
             record: Dict[str, Any] = {}
             for col, typ, val in zip(columns, types, parts):
+                val = val.strip()
                 try:
-                    record[col] = typ(val.strip())
+                    record[col] = typ(val)
                 except (ValueError, TypeError):
-                    record[col] = val.strip()
+                    record[col] = val
+
             rows.append(record)
+
+        # If we successfully parsed rows, return them even if Hive exited non-zero.
+        if rows:
+            return rows
+
+        # No rows were parsed. Only then treat a non-zero exit code as an error.
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Failed to read Hive table '{table}' "
+                f"(exit code {result.returncode}).\n"
+                f"STDERR:\n{result.stderr[-3000:]}"
+            )
+
+        # Return an empty list if the table genuinely has no rows.
         return rows
