@@ -79,7 +79,7 @@ class PigPipeline(BasePipeline):
         tmp_dir = tempfile.mkdtemp(prefix="pig_etl_")
         input_file = os.path.join(tmp_dir, "combined.log")
         output_dir = cfg.get("output_dir", os.path.join(tmp_dir, "pig_out"))
-        pig_logfile = os.path.join(tmp_dir, "pig.log")
+        shutil.rmtree(output_dir, ignore_errors=True)
 
         run_id = str(uuid.uuid4())
         total_records = 0
@@ -118,16 +118,8 @@ class PigPipeline(BasePipeline):
         # ── Phase 2: Invoke Pig ────────────────────────────────────────────
         # Build query-filter param so Pig can skip unneeded output stores
         query_flags = ",".join(sorted(active_queries))
-
-        # Clean output dir (Pig/Hadoop fails if output already exists)
-        # Treat configured output_dir as scratch space for this pipeline.
-        shutil.rmtree(output_dir, ignore_errors=True)
-
         pig_cmd = [
             pig_exe, "-x", "local",
-            "-v",  # print full error messages
-            "-w",  # do not aggregate warnings (helps debugging)
-            "-logfile", pig_logfile,
             "-param", f"INPUT_FILES={input_file}",
             "-param", f"OUTPUT_DIR={output_dir}",
             "-param", f"BATCH_SIZE={self.batch_size}",
@@ -142,28 +134,10 @@ class PigPipeline(BasePipeline):
         )
 
         if result.returncode != 0:
-            stdout_path = os.path.join(tmp_dir, "pig.stdout")
-            stderr_path = os.path.join(tmp_dir, "pig.stderr")
-            try:
-                with open(stdout_path, "w", encoding="utf-8", errors="replace") as fh:
-                    fh.write(result.stdout or "")
-                with open(stderr_path, "w", encoding="utf-8", errors="replace") as fh:
-                    fh.write(result.stderr or "")
-            except OSError:
-                stdout_path = "(failed to write)"
-                stderr_path = "(failed to write)"
-
-            # Keep tmp_dir for debugging (combined input + pig.log).
-            # The orchestrator can still clean it up manually later.
+            shutil.rmtree(tmp_dir, ignore_errors=True)
             raise RuntimeError(
                 f"Pig script failed (exit {result.returncode}).\n"
-                f"Working dir: {tmp_dir}\n"
-                f"Pig logfile: {pig_logfile}\n"
-                f"Pig stdout : {stdout_path}\n"
-                f"Pig stderr : {stderr_path}\n"
-                f"Output dir : {output_dir}\n"
-                f"STDOUT (tail):\n{(result.stdout or '')[-3000:]}\n"
-                f"STDERR (tail):\n{(result.stderr or '')[-3000:]}"
+                f"STDERR:\n{result.stderr[-3000:]}"
             )
 
         # ── Phase 3: Read Pig output back into Python ──────────────────────
@@ -233,11 +207,13 @@ class PigPipeline(BasePipeline):
 
         # ── Phase 4: Save to database (included in runtime) ────────────────
         if engine is not None:
-            from loader.db_loader import save_results
+            from loader.db_loader import save_results, update_run_runtime
             save_results(engine, meta, results, batch_records, dict(error_type_counts))
-
-        # Runtime includes everything from reading input to DB save
-        meta.runtime_seconds = time.perf_counter() - wall_start
+            meta.runtime_seconds = time.perf_counter() - wall_start
+            update_run_runtime(engine, meta.run_id, meta.runtime_seconds)
+        else:
+            # Runtime includes everything from reading input to DB save
+            meta.runtime_seconds = time.perf_counter() - wall_start
 
         return meta, results, batch_records, dict(error_type_counts)
 

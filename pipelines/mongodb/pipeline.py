@@ -166,11 +166,13 @@ class MongoDBPipeline(BasePipeline):
 
         # ── Phase 3: Save to database (included in runtime) ────────────────
         if engine is not None:
-            from loader.db_loader import save_results
+            from loader.db_loader import save_results, update_run_runtime
             save_results(engine, metadata, results, batch_records, dict(error_type_counts))
-
-        # Runtime includes everything from reading input to DB save
-        metadata.runtime_seconds = time.perf_counter() - wall_start
+            metadata.runtime_seconds = time.perf_counter() - wall_start
+            update_run_runtime(engine, metadata.run_id, metadata.runtime_seconds)
+        else:
+            # Runtime includes everything from reading input to DB save
+            metadata.runtime_seconds = time.perf_counter() - wall_start
 
         client.close()
         return metadata, results, batch_records, dict(error_type_counts)
