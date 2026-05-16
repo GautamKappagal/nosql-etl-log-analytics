@@ -1,263 +1,612 @@
-# Multi-Pipeline ETL & Reporting Framework
-### DAS 839 – NoSQL Systems | End Semester Project (Phase 1)
+# Multi-Pipeline ETL and Reporting Framework
+
+DAS 839 - NoSQL Systems End Semester Project
+
+This project is a complete command-line ETL and reporting framework for NASA
+HTTP server log analytics. It runs the same three analytical queries through
+four execution backends:
+
+- MapReduce
+- MongoDB
+- Apache Pig
+- Apache Hive
+
+Each run records metadata, batch statistics, malformed-record summaries, query
+outputs, and runtime information into a relational database. The project can use
+SQLite for local testing and MySQL for the final demonstration.
 
 ---
 
 ## Table of Contents
-1. [Project Overview](#1-project-overview)
-2. [Architecture](#2-architecture)
-3. [Directory Structure](#3-directory-structure)
-4. [Dependencies](#4-dependencies)
-5. [Setup & Installation](#5-setup--installation)
-6. [Downloading the Dataset](#6-downloading-the-dataset)
-7. [Configuration](#7-configuration)
-8. [Running the Tool](#8-running-the-tool)
-9. [Pipeline Descriptions](#9-pipeline-descriptions)
-10. [Mandatory Queries](#10-mandatory-queries)
-11. [Batching & Runtime Reporting](#11-batching--runtime-reporting)
-12. [Relational Schema](#12-relational-schema)
-13. [Running the Tests](#13-running-the-tests)
-14. [Phase 1 Status](#14-phase-1-status)
-15. [Known Limitations & Phase 2 Plan](#15-known-limitations--phase-2-plan)
+
+1. Project Goal
+2. Features
+3. Architecture
+4. Directory Structure
+5. Query Definitions
+6. Pipeline Design
+7. Database Schema
+8. Batching Strategy
+9. Requirements
+10. Setup
+11. Dataset Setup
+12. Configuration
+13. Running the Pipelines
+14. Reporting Commands
+15. MySQL Setup for Final Demo
+16. WSL Commands for Hadoop, Hive, Pig, and MongoDB
+17. Testing with Small Data
+18. Troubleshooting
+19. Evaluation Checklist
+20. GitHub Notes
 
 ---
 
-## 1. Project Overview
+## 1. Project Goal
 
-This tool is a **comparative multi-pipeline ETL and reporting framework** for
-NASA HTTP web server log analytics. It allows the user to select one of four
-execution backends — **MapReduce**, **MongoDB**, **Apache Pig**, or **Apache
-Hive** — and run the same ETL workload through that backend. The results are
-stored in a relational database and rendered in a terminal report.
+The aim of this project is to demonstrate a structured data-management workflow
+for semi-structured web log data. The system is not just a collection of
+independent scripts. It is a single tool with:
 
-The goal is to study how different data-processing paradigms handle the same
-semi-structured log analytics problem and compare them across implementation
-style, runtime, batching behaviour, and reporting suitability.
+- one CLI interface,
+- four selectable execution pipelines,
+- three common queries,
+- configurable batching,
+- pipeline-level loading and cleaning,
+- relational result loading,
+- runtime and metadata capture,
+- and a common reporting layer.
 
----
-
-## 2. Architecture
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                          main.py  (CLI)                          │
-│                    click group: run / report / compare           │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │
-                ┌────────────▼────────────┐
-                │  controller/            │
-                │  orchestrator.py        │
-                │  (wires all layers)     │
-                └──┬──────────┬──────────┘
-                   │          │
-       ┌───────────▼──┐  ┌────▼──────────────┐
-       │  pipelines/  │  │  loader/           │
-       │  ┌─────────┐ │  │  db_loader.py      │
-       │  │mapreduce│ │  │  SQLAlchemy Core   │
-       │  │mongodb  │ │  │  SQLite/MySQL/PG   │
-       │  │pig      │ │  └────────┬───────────┘
-       │  │hive     │ │           │
-       │  └────┬────┘ │  ┌────────▼───────────┐
-       │       │      │  │  reporter/          │
-       └───────┼──────┘  │  report.py          │
-               │         │  Rich terminal UI   │
-       ┌───────▼──────┐  └────────────────────┘
-       │  parser/     │
-       │  log_parser.py│
-       │  (shared by  │
-       │   all pipelines)
-       └──────────────┘
-```
-
-**Key design decisions:**
-
-- **Single shared parser** (`parser/log_parser.py`) is used by every pipeline
-  so that parsing semantics are identical across all four backends.
-- **Each pipeline** subclasses `BasePipeline` and must return the same
-  `RunMetadata` + `List[QueryResult]` types regardless of backend.
-- **The loader** is pipeline-agnostic — it only consumes the standard return
-  types, so adding a new pipeline never requires touching the DB layer.
-- **SQLite** is the default database (zero setup); MySQL and PostgreSQL are
-  supported via a one-line config change.
+The workload uses the NASA Kennedy Space Center HTTP access logs from July and
+August 1995.
 
 ---
 
-## 3. Directory Structure
+## 2. Features
 
-```
-nosql_etl/
-│
-├── main.py                        # CLI entry point
-├── requirements.txt
-├── README.md
-│
-├── config/
-│   └── config.yaml                # Central configuration
-│
-├── data/                          # Drop NASA .gz files here
-│   └── .gitkeep
-│
-├── parser/
-│   ├── __init__.py
-│   └── log_parser.py              # NASA Combined Log Format parser
-│
-├── pipelines/
-│   ├── __init__.py                # Pipeline registry
-│   ├── base.py                    # RunMetadata, QueryResult, BasePipeline
-│   │
-│   ├── mapreduce/
-│   │   ├── __init__.py
-│   │   └── pipeline.py            # Pure-Python Map → Shuffle → Reduce
-│   │
-│   ├── mongodb/
-│   │   ├── __init__.py
-│   │   └── pipeline.py            # pymongo + aggregation framework
-│   │
-│   ├── pig/
-│   │   ├── __init__.py
-│   │   ├── pipeline.py            # Subprocess invocation of Pig CLI
-│   │   └── scripts/
-│   │       └── etl.pig            # Pig Latin ETL script
-│   │
-│   └── hive/
-│       ├── __init__.py
-│       ├── pipeline.py            # Subprocess invocation of Hive CLI
-│       └── scripts/
-│           └── etl.hql            # HiveQL ETL script
-│
-├── loader/
-│   ├── __init__.py
-│   └── db_loader.py               # SQLAlchemy Core – schema + CRUD
-│
-├── reporter/
-│   ├── __init__.py
-│   └── report.py                  # Rich terminal report renderer
-│
-├── controller/
-│   ├── __init__.py
-│   └── orchestrator.py            # Wires pipeline → loader → reporter
-│
-└── tests/
-    ├── test_parser.py
-    ├── test_mapreduce_pipeline.py
-    └── test_loader.py
+- CLI pipeline selection: `mapreduce`, `mongodb`, `pig`, `hive`
+- CLI query selection: `q1`, `q2`, `q3`, or `all`
+- Configurable batch size
+- Support for gzipped `.gz` log files
+- Shared schema and result contract across all pipelines
+- Batch metadata table
+- Malformed-record summary table
+- Query result tables
+- Runtime capture
+- SQLite, MySQL, and PostgreSQL support through SQLAlchemy
+- Rich terminal reports
+- Comparison report across multiple runs
+- Small dataset config for safe demo/testing
+
+---
+
+## 3. Architecture
+
+```text
+main.py
+  |
+  |-- controller/orchestrator.py
+  |     |-- loads YAML config
+  |     |-- resolves selected pipeline
+  |     |-- creates database engine
+  |     |-- initializes result schema
+  |     |-- executes selected query or all queries
+  |     |-- calls common reporter
+  |
+  |-- pipelines/
+  |     |-- mapreduce/
+  |     |-- mongodb/
+  |     |-- pig/
+  |     |-- hive/
+  |
+  |-- parser/log_parser.py
+  |
+  |-- loader/db_loader.py
+  |
+  |-- reporter/report.py
 ```
 
----
+All pipeline classes implement the common `BasePipeline` contract and return:
 
-## 4. Dependencies
+```text
+RunMetadata
+List[QueryResult]
+List[BatchRecord]
+Dict[str, int] malformed_error_counts
+```
 
-### Python version
-Python **3.9 or later** is required.
-
-### Python packages
-
-| Package | Purpose |
-|---|---|
-| `click` | CLI argument parsing |
-| `pyyaml` | Configuration file loading |
-| `sqlalchemy` | Relational DB abstraction (SQLite, MySQL, PostgreSQL) |
-| `pymongo` | MongoDB driver (only needed for the MongoDB pipeline) |
-| `rich` | Terminal table and progress rendering |
-| `tabulate` | Fallback table rendering |
-
-### Optional drivers (install only if not using SQLite)
-
-| Package | Purpose |
-|---|---|
-| `pymysql` | MySQL driver for SQLAlchemy |
-| `psycopg2-binary` | PostgreSQL driver for SQLAlchemy |
-
-### External systems (only needed for specific pipelines)
-
-| Pipeline | External requirement |
-|---|---|
-| `mapreduce` | **None** — runs entirely in-process |
-| `mongodb` | **MongoDB** server ≥ 4.4 running on `localhost:27017` |
-| `pig` | **Apache Pig** ≥ 0.17 installed and on `$PATH` |
-| `hive` | **Apache Hive** ≥ 2.3 (or Beeline) on `$PATH` |
-
-For **Phase 1**, only `mapreduce` and `mongodb` are required.
+This is what allows every backend to use the same relational loader and the
+same report generator.
 
 ---
 
-## 5. Setup & Installation
+## 4. Directory Structure
 
-### Step 1 – Clone the repository
+```text
+nosql-endterm-project/
+  main.py
+  requirements.txt
+  README.md
+
+  config/
+    config.yaml
+    config_small.yaml
+
+  data/
+    NASA_access_log_Jul95.gz
+    NASA_access_log_Aug95.gz
+    small_test/
+      NASA_access_log_small.gz
+
+  controller/
+    orchestrator.py
+
+  parser/
+    log_parser.py
+
+  pipelines/
+    base.py
+    __init__.py
+
+    mapreduce/
+      pipeline.py
+
+    mongodb/
+      pipeline.py
+
+    pig/
+      pipeline.py
+      scripts/
+        etl.pig
+
+    hive/
+      pipeline.py
+      scripts/
+        etl.hql
+
+  loader/
+    db_loader.py
+
+  reporter/
+    report.py
+
+  tests/
+    test_parser.py
+    test_mapreduce_pipeline.py
+    test_loader.py
+```
+
+---
+
+## 5. Query Definitions
+
+The same three mandatory queries are implemented for all four pipelines.
+
+### Query 1: Daily Traffic Summary
+
+For each `(log_date, status_code)` pair:
+
+- count requests,
+- sum bytes transferred.
+
+Output columns:
+
+```text
+log_date
+status_code
+request_count
+total_bytes
+```
+
+### Query 2: Top 20 Requested Resources
+
+For each resource path:
+
+- count requests,
+- sum bytes transferred,
+- count distinct requesting hosts,
+- return the top 20 by request count.
+
+Output columns:
+
+```text
+resource_path
+request_count
+total_bytes
+distinct_host_count
+```
+
+### Query 3: Hourly Error Analysis
+
+For each `(log_date, log_hour)` pair:
+
+- count 4xx/5xx requests,
+- count total requests,
+- compute error rate,
+- count distinct error-generating hosts.
+
+Output columns:
+
+```text
+log_date
+log_hour
+error_request_count
+total_request_count
+error_rate
+distinct_error_hosts
+```
+
+---
+
+## 6. Pipeline Design
+
+### MapReduce Pipeline
+
+File:
+
+```text
+pipelines/mapreduce/pipeline.py
+```
+
+The MapReduce pipeline runs in-process and requires no Hadoop installation.
+
+Important design point: loading and cleaning are part of the MapReduce pipeline
+itself. Raw batch records flow through a dedicated load/clean MapReduce job:
+
+```text
+raw batch records
+  -> load_clean mapper
+  -> shuffle/group
+  -> load_clean reducer
+  -> cleaned records + batch metadata + malformed summary
+  -> query MapReduce jobs
+```
+
+This satisfies the requirement that loading and cleaning should not be a
+separate single-threaded preprocessing script.
+
+### MongoDB Pipeline
+
+File:
+
+```text
+pipelines/mongodb/pipeline.py
+```
+
+The MongoDB pipeline:
+
+1. reads raw log batches,
+2. parses records into documents,
+3. bulk inserts cleaned documents into MongoDB,
+4. creates indexes,
+5. executes the three mandatory queries using MongoDB aggregation pipelines,
+6. saves standardized results to the relational database.
+
+MongoDB must be running on `localhost:27017`.
+
+### Pig Pipeline
+
+Files:
+
+```text
+pipelines/pig/pipeline.py
+pipelines/pig/scripts/etl.pig
+```
+
+The Pig pipeline:
+
+1. writes all raw input lines to a temporary file,
+2. sends the raw file to Pig,
+3. performs parsing, filtering, cleaning, grouping, ordering, and aggregation in
+   Pig Latin,
+4. reads Pig part files back into the common result format,
+5. saves results to the relational database.
+
+Pig local mode is used:
+
 ```bash
-git clone <your-repo-url>
-cd nosql_etl
+pig -x local
 ```
 
-### Step 2 – Create a virtual environment (recommended)
+### Hive Pipeline
+
+Files:
+
+```text
+pipelines/hive/pipeline.py
+pipelines/hive/scripts/etl.hql
+```
+
+The Hive pipeline:
+
+1. writes all raw input lines to a temporary file,
+2. uploads the file to HDFS,
+3. creates an external `raw_logs` table,
+4. creates a parsed view,
+5. materializes a cleaned `etl_logs` table,
+6. creates query result tables using HiveQL,
+7. reads results back through Hive,
+8. saves standardized results to the relational database.
+
+The default Hive execution engine is MapReduce:
+
+```yaml
+hive:
+  execution_engine: mr
+```
+
+This avoids Tez runtime issues on local WSL installations while still keeping
+the pipeline inside Hive.
+
+---
+
+## 7. Database Schema
+
+The loader creates the following relational tables.
+
+### `run_metadata`
+
+One row per pipeline run.
+
+```text
+run_id
+pipeline_name
+batch_size
+total_records
+malformed_records
+num_batches
+avg_batch_size
+runtime_seconds
+executed_at
+query_runtimes
+```
+
+### `batch_metadata`
+
+One row per processed batch.
+
+```text
+run_id
+batch_id
+records_in_batch
+malformed_in_batch
+```
+
+### `malformed_record_summary`
+
+One row per malformed record type per run.
+
+```text
+run_id
+error_type
+count
+```
+
+### `query_results_q1`
+
+Stores Query 1 output.
+
+```text
+run_id
+pipeline_name
+batch_id
+executed_at
+log_date
+status_code
+request_count
+total_bytes
+```
+
+### `query_results_q2`
+
+Stores Query 2 output.
+
+```text
+run_id
+pipeline_name
+batch_id
+executed_at
+resource_path
+request_count
+total_bytes
+distinct_host_count
+```
+
+### `query_results_q3`
+
+Stores Query 3 output.
+
+```text
+run_id
+pipeline_name
+batch_id
+executed_at
+log_date
+log_hour
+error_request_count
+total_request_count
+error_rate
+distinct_error_hosts
+```
+
+---
+
+## 8. Batching Strategy
+
+Batching is controlled by:
+
+```yaml
+etl:
+  batch_size: 10000
+```
+
+For example, if `batch_size` is `10000`, the framework reads up to 10,000 log
+records per batch. Batch IDs start at `1` and increase sequentially. The final
+batch may contain fewer than `batch_size` records.
+
+The framework records:
+
+```text
+records_in_batch
+malformed_in_batch
+num_batches
+avg_batch_size = total_records / num_batches
+```
+
+For fair comparison, use the same batch size for all pipelines during a
+comparative run.
+
+---
+
+## 9. Requirements
+
+### Python
+
+Python 3.9 or later.
+
+Python packages:
+
+```text
+click
+pyyaml
+pymongo
+sqlalchemy
+rich
+tabulate
+```
+
+Optional database drivers:
+
+```text
+pymysql
+psycopg2-binary
+```
+
+### External Systems
+
+| Pipeline | Requirement |
+|---|---|
+| MapReduce | No external service |
+| MongoDB | MongoDB server on localhost:27017 |
+| Pig | Apache Pig 0.17+ |
+| Hive | Hadoop, HDFS, YARN, Hive |
+
+---
+
+## 10. Setup
+
+### Linux / WSL setup
+
+Go to the project:
+
+```bash
+cd ~/nosql-endterm-project
+```
+
+Create and activate a virtual environment:
+
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate        # macOS / Linux
-# .venv\Scripts\activate         # Windows
+source .venv/bin/activate
 ```
 
-### Step 3 – Install dependencies
+Install dependencies:
+
 ```bash
 pip install -r requirements.txt
 ```
 
-If you intend to use **MySQL**:
+If using MySQL:
+
 ```bash
 pip install pymysql
 ```
 
-If you intend to use **PostgreSQL**:
+If using PostgreSQL:
+
 ```bash
 pip install psycopg2-binary
 ```
 
+### Windows PowerShell setup
+
+Go to the project:
+
+```powershell
+cd C:\Users\raipr\Downloads\nosql-endterm-project
+```
+
+Create and activate a virtual environment:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+Install dependencies:
+
+```powershell
+pip install -r requirements.txt
+```
+
 ---
 
-## 6. Downloading the Dataset
+## 11. Dataset Setup
 
-The project requires the official NASA Kennedy Space Center HTTP access logs
-from the Internet Traffic Archive. Download them into the `data/` folder:
+Create the data folder:
 
 ```bash
 mkdir -p data
+```
+
+Download the NASA logs:
+
+```bash
 wget https://ita.ee.lbl.gov/traces/NASA_access_log_Jul95.gz -P data/
 wget https://ita.ee.lbl.gov/traces/NASA_access_log_Aug95.gz -P data/
 ```
 
-Or with curl:
+Or with `curl`:
+
 ```bash
 curl -L https://ita.ee.lbl.gov/traces/NASA_access_log_Jul95.gz -o data/NASA_access_log_Jul95.gz
 curl -L https://ita.ee.lbl.gov/traces/NASA_access_log_Aug95.gz -o data/NASA_access_log_Aug95.gz
 ```
 
-> **Do not decompress, edit, or preprocess the files.** The tool reads `.gz`
-> files directly. Decompression is handled in-process by the parser.
+Do not manually decompress the files for MapReduce or MongoDB. The parser reads
+`.gz` files directly.
 
 ---
 
-## 7. Configuration
+## 12. Configuration
 
-All settings live in `config/config.yaml`. Edit this file before running.
+Main config file:
 
-### Key settings
-
-```yaml
-etl:
-  batch_size: 10000          # Records per batch — keep consistent across pipelines
-  log_files:
-    - ./data/NASA_access_log_Jul95.gz
-    - ./data/NASA_access_log_Aug95.gz
-
-database:
-  type: sqlite               # sqlite | mysql | postgresql
-
-mongodb:
-  host: localhost
-  port: 27017
-  database: nosql_etl
+```text
+config/config.yaml
 ```
 
-### Switching to MySQL
+Small demo config:
+
+```text
+config/config_small.yaml
+```
+
+### Default SQLite config
+
+SQLite is easiest for local testing:
+
+```yaml
+database:
+  type: sqlite
+  sqlite:
+    path: ./etl_results.db
+```
+
+### MySQL config
+
+For final evaluation, MySQL is recommended:
+
 ```yaml
 database:
   type: mysql
@@ -266,262 +615,677 @@ database:
     port: 3306
     database: nosql_etl
     username: root
-    password: yourpassword
+    password: your_password
+```
+
+### ETL config
+
+Full dataset:
+
+```yaml
+etl:
+  batch_size: 10000
+  log_files:
+    - ./data/NASA_access_log_Jul95.gz
+    - ./data/NASA_access_log_Aug95.gz
+```
+
+Small test dataset:
+
+```yaml
+etl:
+  batch_size: 10000
+  log_files:
+    - ./data/small_test/NASA_access_log_small.gz
+```
+
+### Hive config
+
+```yaml
+hive:
+  executable: hive
+  hdfs_executable: hdfs
+  execution_engine: mr
+  warehouse_dir: /user/hive/warehouse
+  output_dir: /tmp/hive_etl_output
+```
+
+### Pig config
+
+```yaml
+pig:
+  executable: pig
+  output_dir: /tmp/pig_etl_output
+```
+
+### MongoDB config
+
+```yaml
+mongodb:
+  host: localhost
+  port: 27017
+  database: nosql_etl
+  raw_collection: web_logs
 ```
 
 ---
 
-## 8. Running the Tool
+## 13. Running the Pipelines
 
-All commands are run from the `nosql_etl/` root directory.
-
-### Execute a pipeline
+All commands should be run from the project root.
 
 ```bash
-# MapReduce (no external dependencies)
-python main.py run --pipeline mapreduce
-
-# MongoDB (requires MongoDB server running)
-python main.py run --pipeline mongodb
-
-# Apache Pig (requires Pig installed)
-python main.py run --pipeline pig
-
-# Apache Hive (requires Hive installed)
-python main.py run --pipeline hive
+cd ~/nosql-endterm-project
+source .venv/bin/activate
 ```
 
-After the run completes the tool prints the `run_id`.
+On Windows:
 
-### View the report for a specific run
+```powershell
+cd C:\Users\raipr\Downloads\nosql-endterm-project
+.\.venv\Scripts\Activate.ps1
+```
+
+### MapReduce
+
+Run all queries:
 
 ```bash
-python main.py report --run-id <run_id_printed_above>
+python main.py run --pipeline mapreduce --config config/config_small.yaml
 ```
 
-### View the most recent run (or comparison if multiple runs exist)
+Run only Query 1:
 
 ```bash
-python main.py report
+python main.py run --pipeline mapreduce --query q1 --config config/config_small.yaml
 ```
 
-### View a side-by-side comparison of all stored runs
+Run only Query 2:
 
 ```bash
-python main.py compare
+python main.py run --pipeline mapreduce --query q2 --config config/config_small.yaml
 ```
 
-### Custom config path
+Run only Query 3:
 
 ```bash
-python main.py run --pipeline mongodb --config /path/to/my_config.yaml
+python main.py run --pipeline mapreduce --query q3 --config config/config_small.yaml
 ```
 
----
-
-## 9. Pipeline Descriptions
-
-### MapReduce (`--pipeline mapreduce`)
-A pure-Python implementation of the classical Map → Shuffle/Sort → Reduce
-pattern. Records are processed in batches using the shared parser. Three
-separate map/reduce pairs implement the three mandatory queries. No Hadoop
-installation is required — the pipeline runs entirely in-process.
-
-**Suitable for**: development, testing, baseline comparison, environments
-without Hadoop.
-
----
-
-### MongoDB (`--pipeline mongodb`)
-Records are bulk-inserted into a MongoDB collection in batches. Three
-server-side aggregation pipelines (`$group`, `$sort`, `$limit`, `$project`,
-`$addFields`) implement the mandatory queries. Indexes are created on
-`log_date + status_code`, `resource_path`, and `log_date + log_hour` before
-queries run. The raw collection is dropped and recreated on each run for
-idempotency.
-
-**Suitable for**: demonstrating document-store aggregation; fast on the full
-~3.5M-record dataset.
-
----
-
-### Apache Pig (`--pipeline pig`)
-The Python orchestrator writes a combined flat log file, then invokes the Pig
-Latin script (`pipelines/pig/scripts/etl.pig`) via subprocess in local mode
-(`pig -x local`). A custom UDF handles log parsing. Pig writes CSV part-files
-to an output directory; the orchestrator reads them back into Python dicts.
-
-**Requires**: Apache Pig ≥ 0.17 on `$PATH`.
-
----
-
-### Apache Hive (`--pipeline hive`)
-The Python orchestrator writes a flat log file, creates an external Hive table
-pointing at it, then runs the HiveQL script (`pipelines/hive/scripts/etl.hql`)
-via subprocess. The script materialises a cleaned `etl_logs` table and runs
-three `CREATE TABLE AS SELECT` queries. Results are read back via `hive -e`.
-
-**Requires**: Apache Hive ≥ 2.3 (or Beeline) on `$PATH`.
-
----
-
-## 10. Mandatory Queries
-
-All four pipelines implement the exact same three queries with the same output
-schema.
-
-### Query 1 — Daily Traffic Summary
-For each `(log_date, status_code)` pair, compute total request count and total
-bytes transferred.
-
-**Output columns**: `log_date`, `status_code`, `request_count`, `total_bytes`
-
----
-
-### Query 2 — Top 20 Requested Resources
-Rank resource paths by request count (descending), take the top 20. For each,
-compute total requests, total bytes, and the number of distinct requesting
-hosts.
-
-**Output columns**: `resource_path`, `request_count`, `total_bytes`,
-`distinct_host_count`
-
----
-
-### Query 3 — Hourly Error Analysis
-For each `(log_date, log_hour)` pair, compute the count of 4xx/5xx requests,
-the total request count, the error rate, and the distinct host count among
-error-generating requests.
-
-**Output columns**: `log_date`, `log_hour`, `error_request_count`,
-`total_request_count`, `error_rate`, `distinct_error_hosts`
-
----
-
-## 11. Batching & Runtime Reporting
-
-- `batch_size` is set in `config/config.yaml` and controls how many log
-  records are processed per batch.
-- Batch IDs start at **1** and increment sequentially.
-- The final batch may contain fewer than `batch_size` records and is still
-  counted as a valid batch.
-- **Average batch size** = `total_records / num_batches`
-- **Runtime** is measured from the moment the tool starts reading input files
-  until the final aggregated results are written to the relational DB.
-  Dataset download time, software installation time, and report rendering time
-  are excluded.
-- For fair cross-pipeline comparisons keep `batch_size` identical across runs.
-
----
-
-## 12. Relational Schema
-
-All results are persisted in a relational DB (SQLite by default).
-
-### `run_metadata`
-| Column | Type | Notes |
-|---|---|---|
-| `run_id` | VARCHAR(64) PK | UUID per run |
-| `pipeline_name` | VARCHAR(32) | mapreduce / mongodb / pig / hive |
-| `batch_size` | INT | configured batch size |
-| `total_records` | BIGINT | including malformed |
-| `malformed_records` | BIGINT | failed parse count |
-| `num_batches` | INT | |
-| `avg_batch_size` | FLOAT | total_records / num_batches |
-| `runtime_seconds` | FLOAT | wall-clock ETL time |
-| `executed_at` | DATETIME | UTC |
-| `query_runtimes` | TEXT | JSON blob: {query_name → seconds} |
-
-### `query_results_q1` — Daily Traffic Summary
-| Column | Type |
-|---|---|
-| `run_id` | VARCHAR(64) FK |
-| `pipeline_name` | VARCHAR(32) |
-| `batch_id` | INT |
-| `executed_at` | DATETIME |
-| `log_date` | VARCHAR(16) |
-| `status_code` | INT |
-| `request_count` | BIGINT |
-| `total_bytes` | BIGINT |
-
-### `query_results_q2` — Top Requested Resources
-| Column | Type |
-|---|---|
-| `run_id` | VARCHAR(64) FK |
-| `pipeline_name` | VARCHAR(32) |
-| `batch_id` | INT |
-| `executed_at` | DATETIME |
-| `resource_path` | TEXT |
-| `request_count` | BIGINT |
-| `total_bytes` | BIGINT |
-| `distinct_host_count` | INT |
-
-### `query_results_q3` — Hourly Error Analysis
-| Column | Type |
-|---|---|
-| `run_id` | VARCHAR(64) FK |
-| `pipeline_name` | VARCHAR(32) |
-| `batch_id` | INT |
-| `executed_at` | DATETIME |
-| `log_date` | VARCHAR(16) |
-| `log_hour` | INT |
-| `error_request_count` | BIGINT |
-| `total_request_count` | BIGINT |
-| `error_rate` | FLOAT |
-| `distinct_error_hosts` | INT |
-
----
-
-## 13. Running the Tests
+Override batch size:
 
 ```bash
-pip install pytest
-pytest tests/ -v
+python main.py run --pipeline mapreduce --batch-size 5000 --config config/config_small.yaml
 ```
 
-The test suite covers:
-- `test_parser.py` — 10 unit tests for the log parser (valid lines, malformed
-  lines, edge cases like missing bytes, missing protocol).
-- `test_mapreduce_pipeline.py` — 9 integration tests for the MapReduce
-  pipeline on a small synthetic log file. No NASA data required.
-- `test_loader.py` — 6 tests for the DB loader using an in-memory SQLite
-  database.
+### MongoDB
 
-All 25 tests pass without any external services running.
+Start MongoDB in WSL if installed as a service:
+
+```bash
+sudo service mongod start
+```
+
+If WSL does not have a MongoDB service, start manually:
+
+```bash
+sudo mkdir -p /data/db
+sudo chown -R "$USER":"$USER" /data/db
+mongod --dbpath /data/db --bind_ip 127.0.0.1 --port 27017
+```
+
+Leave that terminal open. In a second terminal:
+
+```bash
+cd ~/nosql-endterm-project
+source .venv/bin/activate
+mongosh --eval "db.runCommand({ ping: 1 })"
+python main.py run --pipeline mongodb --config config/config_small.yaml
+```
+
+Run one query:
+
+```bash
+python main.py run --pipeline mongodb --query q1 --config config/config_small.yaml
+```
+
+### Pig
+
+Check Pig:
+
+```bash
+pig -version
+```
+
+Clean old Pig output and run:
+
+```bash
+rm -rf /tmp/pig_etl_output
+python main.py run --pipeline pig --config config/config_small.yaml
+```
+
+Run one query:
+
+```bash
+rm -rf /tmp/pig_etl_output
+python main.py run --pipeline pig --query q1 --config config/config_small.yaml
+```
+
+### Hive
+
+Start Hadoop services:
+
+```bash
+start-dfs.sh
+start-yarn.sh
+jps
+```
+
+Expected important processes:
+
+```text
+NameNode
+DataNode
+ResourceManager
+NodeManager
+```
+
+Clean old Hive input:
+
+```bash
+hdfs dfs -rm -r -f /tmp/hive_input
+```
+
+Run Hive:
+
+```bash
+python main.py run --pipeline hive --config config/config_small.yaml
+```
+
+Run one query:
+
+```bash
+hdfs dfs -rm -r -f /tmp/hive_input
+python main.py run --pipeline hive --query q1 --config config/config_small.yaml
+```
+
+Monitor YARN:
+
+```bash
+yarn application -list
+yarn node -list
+```
+
+Check a specific YARN application:
+
+```bash
+yarn application -status <application_id>
+```
 
 ---
 
-## 14. Phase 1 Status
+## 14. Reporting Commands
 
-| Component | Status |
-|---|---|
-| Shared log parser | ✅ Complete |
-| `BasePipeline` contract | ✅ Complete |
-| MapReduce pipeline | ✅ Complete — fully working, no external deps |
-| MongoDB pipeline | ✅ Complete — requires MongoDB server |
-| Pig pipeline | ✅ Script + orchestrator written; requires Pig installed |
-| Hive pipeline | ✅ Script + orchestrator written; requires Hive installed |
-| DB loader (SQLite / MySQL / PG) | ✅ Complete |
-| Terminal reporter | ✅ Complete |
-| CLI (`run` / `report` / `compare`) | ✅ Complete |
-| Unit + integration tests | ✅ 25 tests passing |
-| README | ✅ This file |
+Show the latest run or comparison:
 
-**For Phase 1 review**, the two fully working pipelines without any additional
-infrastructure are **MapReduce** and **MongoDB**.
+```bash
+python main.py report --config config/config_small.yaml
+```
+
+Show a specific run:
+
+```bash
+python main.py report --run-id <run_id> --config config/config_small.yaml
+```
+
+Show comparison across all runs:
+
+```bash
+python main.py compare --config config/config_small.yaml
+```
+
+Example workflow:
+
+```bash
+python main.py run --pipeline mapreduce --query q1 --config config/config_small.yaml
+python main.py run --pipeline mongodb --query q1 --config config/config_small.yaml
+python main.py run --pipeline pig --query q1 --config config/config_small.yaml
+python main.py run --pipeline hive --query q1 --config config/config_small.yaml
+python main.py compare --config config/config_small.yaml
+```
 
 ---
 
-## 15. Known Limitations & Phase 2 Plan
+## 15. MySQL Setup for Final Demo
 
-- The **Pig UDF jar** (`com.etl.pig.LogParserUDF`) is declared in the Pig
-  script but the Java source is not yet written. For Phase 2 the UDF will be
-  implemented in Java, compiled, and bundled in `pipelines/pig/lib/`.
-- The **Hive** pipeline's `log_date` derivation uses HiveQL string functions
-  that behave correctly for the NASA log timestamp format but have not been
-  tested against a live Hive cluster in Phase 1.
-- **Parallel batch processing** (threading/multiprocessing) is not yet
-  implemented for the MapReduce pipeline. Phase 2 will add an optional
-  `--workers N` flag.
-- **Error-rate colour coding** in the reporter uses a fixed threshold
-  (>10% = red, >5% = yellow). This will be made configurable in Phase 2.
+Install driver:
+
+```bash
+pip install pymysql
+```
+
+Create database:
+
+```bash
+mysql -u root -p
+```
+
+Inside MySQL:
+
+```sql
+CREATE DATABASE IF NOT EXISTS nosql_etl;
+SHOW DATABASES;
+EXIT;
+```
+
+Update `config/config.yaml`:
+
+```yaml
+database:
+  type: mysql
+  mysql:
+    host: localhost
+    port: 3306
+    database: nosql_etl
+    username: root
+    password: your_password
+```
+
+Run a pipeline:
+
+```bash
+python main.py run --pipeline mapreduce --config config/config.yaml
+```
+
+Inspect tables:
+
+```bash
+mysql -u root -p nosql_etl
+```
+
+Inside MySQL:
+
+```sql
+SHOW TABLES;
+SELECT * FROM run_metadata ORDER BY executed_at DESC LIMIT 5;
+SELECT * FROM batch_metadata LIMIT 10;
+SELECT * FROM malformed_record_summary LIMIT 10;
+SELECT * FROM query_results_q1 LIMIT 10;
+SELECT * FROM query_results_q2 LIMIT 10;
+SELECT * FROM query_results_q3 LIMIT 10;
+EXIT;
+```
+
+---
+
+## 16. WSL Commands for Hadoop, Hive, Pig, and MongoDB
+
+### Hadoop / YARN
+
+Start:
+
+```bash
+start-dfs.sh
+start-yarn.sh
+jps
+```
+
+Stop:
+
+```bash
+stop-yarn.sh
+stop-dfs.sh
+```
+
+Check HDFS:
+
+```bash
+hdfs dfs -ls /
+hdfs dfs -ls /tmp
+hdfs dfs -du -h /tmp/hive_input
+```
+
+Clean Hive input:
+
+```bash
+hdfs dfs -rm -r -f /tmp/hive_input
+```
+
+### Hive
+
+Check version:
+
+```bash
+hive --version
+```
+
+Show project Hive tables:
+
+```bash
+hive --hiveconf hive.execution.engine=mr -e "USE nosql_etl_hive; SHOW TABLES;"
+```
+
+Check cleaned rows:
+
+```bash
+hive --hiveconf hive.execution.engine=mr -e "USE nosql_etl_hive; SELECT COUNT(*) FROM etl_logs;"
+```
+
+Preview Query 1:
+
+```bash
+hive --hiveconf hive.execution.engine=mr -e "USE nosql_etl_hive; SELECT * FROM q1_daily_traffic LIMIT 10;"
+```
+
+### Pig
+
+Check version:
+
+```bash
+pig -version
+```
+
+Clean output:
+
+```bash
+rm -rf /tmp/pig_etl_output
+```
+
+### MongoDB
+
+Check binaries:
+
+```bash
+which mongod
+which mongosh
+```
+
+Start manually if service is unavailable:
+
+```bash
+sudo mkdir -p /data/db
+sudo chown -R "$USER":"$USER" /data/db
+mongod --dbpath /data/db --bind_ip 127.0.0.1 --port 27017
+```
+
+Ping:
+
+```bash
+mongosh --eval "db.runCommand({ ping: 1 })"
+```
+
+Inspect collection:
+
+```bash
+mongosh nosql_etl --eval "db.web_logs.countDocuments()"
+mongosh nosql_etl --eval "db.web_logs.findOne()"
+```
+
+---
+
+## 17. Testing with Small Data
+
+Create a 10,000-line sample:
+
+```bash
+cd ~/nosql-endterm-project
+mkdir -p data/small_test
+zcat data/NASA_access_log_Jul95.gz | head -n 10000 | gzip > data/small_test/NASA_access_log_small.gz
+```
+
+Create small config:
+
+```bash
+cp config/config.yaml config/config_small.yaml
+nano config/config_small.yaml
+```
+
+Set:
+
+```yaml
+etl:
+  batch_size: 10000
+  log_files:
+    - ./data/small_test/NASA_access_log_small.gz
+```
+
+Run all pipelines on small data:
+
+```bash
+python main.py run --pipeline mapreduce --config config/config_small.yaml
+python main.py run --pipeline mongodb --config config/config_small.yaml
+rm -rf /tmp/pig_etl_output
+python main.py run --pipeline pig --config config/config_small.yaml
+hdfs dfs -rm -r -f /tmp/hive_input
+python main.py run --pipeline hive --config config/config_small.yaml
+```
+
+Compare:
+
+```bash
+python main.py compare --config config/config_small.yaml
+```
+
+---
+
+## 18. Troubleshooting
+
+### SLF4J warnings
+
+Messages such as the following are usually warnings, not the actual failure:
+
+```text
+SLF4J: Class path contains multiple SLF4J bindings.
+```
+
+Look for the real error after the warning block.
+
+### Hive fails with TezTask
+
+Error:
+
+```text
+FAILED: Execution Error, return code 1 from org.apache.hadoop.hive.ql.exec.tez.TezTask
+```
+
+Use MapReduce execution engine:
+
+```yaml
+hive:
+  execution_engine: mr
+```
+
+The pipeline passes this to Hive:
+
+```bash
+--hiveconf hive.execution.engine=mr
+```
+
+### Hive stuck at 0 percent or 5 percent
+
+Check YARN:
+
+```bash
+yarn application -list
+yarn node -list
+```
+
+Check the application:
+
+```bash
+yarn application -status <application_id>
+```
+
+If no NodeManager is active:
+
+```bash
+stop-yarn.sh
+stop-dfs.sh
+start-dfs.sh
+start-yarn.sh
+jps
+```
+
+### Pig output already exists
+
+Clean output:
+
+```bash
+rm -rf /tmp/pig_etl_output
+```
+
+The Python wrapper also clears this directory before running.
+
+### MongoDB service not found
+
+If this fails:
+
+```bash
+sudo service mongod start
+```
+
+Run MongoDB manually:
+
+```bash
+sudo mkdir -p /data/db
+sudo chown -R "$USER":"$USER" /data/db
+mongod --dbpath /data/db --bind_ip 127.0.0.1 --port 27017
+```
+
+### Python cannot import packages
+
+Activate the virtual environment:
+
+```bash
+source .venv/bin/activate
+```
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+### MySQL driver missing
+
+Install:
+
+```bash
+pip install pymysql
+```
+
+---
+
+## 19. Evaluation Checklist
+
+During the demonstration, show the following:
+
+1. CLI pipeline selection:
+
+```bash
+python main.py run --pipeline mapreduce --query q1 --config config/config_small.yaml
+```
+
+2. Query selection:
+
+```bash
+python main.py run --pipeline hive --query q1 --config config/config_small.yaml
+```
+
+3. Batch size:
+
+```bash
+python main.py run --pipeline mapreduce --batch-size 5000 --config config/config_small.yaml
+```
+
+4. Batch metadata:
+
+```sql
+SELECT * FROM batch_metadata LIMIT 10;
+```
+
+5. Malformed summary:
+
+```sql
+SELECT * FROM malformed_record_summary LIMIT 10;
+```
+
+6. Run metadata:
+
+```sql
+SELECT run_id, pipeline_name, batch_size, total_records, malformed_records,
+       num_batches, avg_batch_size, runtime_seconds
+FROM run_metadata
+ORDER BY executed_at DESC
+LIMIT 10;
+```
+
+7. Query result tables:
+
+```sql
+SELECT * FROM query_results_q1 LIMIT 10;
+SELECT * FROM query_results_q2 LIMIT 10;
+SELECT * FROM query_results_q3 LIMIT 10;
+```
+
+8. Common reporting layer:
+
+```bash
+python main.py report --config config/config_small.yaml
+python main.py compare --config config/config_small.yaml
+```
+
+9. All four pipelines:
+
+```bash
+python main.py run --pipeline mapreduce --query q1 --config config/config_small.yaml
+python main.py run --pipeline mongodb --query q1 --config config/config_small.yaml
+python main.py run --pipeline pig --query q1 --config config/config_small.yaml
+python main.py run --pipeline hive --query q1 --config config/config_small.yaml
+```
+
+---
+
+## 20. GitHub Notes
+
+Commit source/config files:
+
+```bash
+git add README.md \
+  config/config.yaml \
+  config/config_small.yaml \
+  loader/db_loader.py \
+  pipelines/mapreduce/pipeline.py \
+  pipelines/mongodb/pipeline.py \
+  pipelines/pig/pipeline.py \
+  pipelines/pig/scripts/etl.pig \
+  pipelines/hive/pipeline.py \
+  pipelines/hive/scripts/etl.hql
+```
+
+Do not commit generated files:
+
+```text
+etl_results.db
+derby.log
+__pycache__/
+*.pyc
+```
+
+Commit:
+
+```bash
+git status
+git commit -m "Complete multi-pipeline ETL framework"
+git push
+```
+
+If the small dataset is allowed by the instructor and small enough, you may
+also commit:
+
+```bash
+git add data/small_test/NASA_access_log_small.gz
+```
+
+Otherwise, keep datasets out of GitHub and document how to create them with the
+commands above.
