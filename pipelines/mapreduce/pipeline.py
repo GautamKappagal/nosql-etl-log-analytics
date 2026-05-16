@@ -14,6 +14,7 @@ so the complete path for this backend is:
     raw batch source -> load/clean MapReduce -> query MapReduce -> DB loader
 """
 
+
 from __future__ import annotations
 
 import time
@@ -24,6 +25,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Set,
 
 from parser.log_parser import batch_read_log_files, parse_log_line
 from pipelines.base import BasePipeline, BatchRecord, QueryResult, RunMetadata
+
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
