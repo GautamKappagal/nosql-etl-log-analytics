@@ -1174,75 +1174,10 @@ Install:
 pip install pymysql
 ```
 
----
 
-## 19. Evaluation Checklist
 
-During the demonstration, show the following:
 
-1. CLI pipeline selection:
 
-```bash
-python main.py run --pipeline mapreduce --query q1 --config config/config_small.yaml
-```
-
-2. Query selection:
-
-```bash
-python main.py run --pipeline hive --query q1 --config config/config_small.yaml
-```
-
-3. Batch size:
-
-```bash
-python main.py run --pipeline mapreduce --batch-size 5000 --config config/config_small.yaml
-```
-
-4. Batch metadata:
-
-```sql
-SELECT * FROM batch_metadata LIMIT 10;
-```
-
-5. Malformed summary:
-
-```sql
-SELECT * FROM malformed_record_summary LIMIT 10;
-```
-
-6. Run metadata:
-
-```sql
-SELECT run_id, pipeline_name, batch_size, total_records, malformed_records,
-       num_batches, avg_batch_size, runtime_seconds
-FROM run_metadata
-ORDER BY executed_at DESC
-LIMIT 10;
-```
-
-7. Query result tables:
-
-```sql
-SELECT * FROM query_results_q1 LIMIT 10;
-SELECT * FROM query_results_q2 LIMIT 10;
-SELECT * FROM query_results_q3 LIMIT 10;
-```
-
-8. Common reporting layer:
-
-```bash
-python main.py report --config config/config_small.yaml
-python main.py compare --config config/config_small.yaml
-```
-
-9. All four pipelines:
-
-```bash
-python main.py run --pipeline mapreduce --query q1 --config config/config_small.yaml
-python main.py run --pipeline mongodb --query q1 --config config/config_small.yaml
-python main.py run --pipeline pig --query q1 --config config/config_small.yaml
-python main.py run --pipeline hive --query q1 --config config/config_small.yaml
-```
 
 ---
 
